@@ -41,13 +41,69 @@ var Rules = []Rule{
 	{"CS010", "Timing-unsafe compare", regexp.MustCompile(`(?i)\b(?:hmac|mac|digest|signature)\b[^(]*(?:==|!=)`), Medium, "CWE-208"},
 }
 
+// parseSuppression checks a source line for inline suppression comments.
+// It returns (suppressAll, suppressedRuleIDs).
+//   - // cryptosweep:ignore  or  // nolint:cryptosweep  → suppress all rules
+//   - // cryptosweep:ignore=CS001,CS008              → suppress only listed IDs
+func parseSuppression(line string) (bool, map[string]bool) {
+	// // nolint:cryptosweep always suppresses every rule on the line.
+	if strings.Contains(line, "// nolint:cryptosweep") {
+		return true, nil
+	}
+
+	idx := strings.Index(line, "// cryptosweep:ignore")
+	if idx == -1 {
+		return false, nil
+	}
+
+	rest := line[idx+len("// cryptosweep:ignore"):]
+
+	// Nothing after the marker, or only whitespace → suppress all.
+	if len(rest) == 0 || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\r' {
+		return true, nil
+	}
+
+	// Rule-specific suppression: // cryptosweep:ignore=CS001,CS008
+	if rest[0] == '=' {
+		idsPart := rest[1:]
+		// Stop at first whitespace so trailing comments are ignored.
+		if sp := strings.IndexAny(idsPart, " \t\r"); sp != -1 {
+			idsPart = idsPart[:sp]
+		}
+		tokens := strings.Split(idsPart, ",")
+		m := make(map[string]bool, len(tokens))
+		for _, tok := range tokens {
+			if id := strings.TrimSpace(tok); id != "" {
+				m[id] = true
+			}
+		}
+		if len(m) > 0 {
+			return false, m
+		}
+	}
+
+	return false, nil
+}
+
+// Scan analyses the content of a single file and returns all findings.
 func Scan(filename, content string) []Finding {
 	var findings []Finding
-	for i, line := range strings.Split(content, "\n") {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		suppressAll, suppressIDs := parseSuppression(line)
+		if suppressAll {
+			continue
+		}
 		for _, rule := range Rules {
 			if rule.Pattern.MatchString(line) {
+				if len(suppressIDs) > 0 && suppressIDs[rule.ID] {
+					continue
+				}
 				findings = append(findings, Finding{
-					Rule: rule, File: filename, Line: i + 1, Match: line,
+					Rule:  rule,
+					File:  filename,
+					Line:  i + 1,
+					Match: line,
 				})
 			}
 		}
